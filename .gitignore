@@ -1,0 +1,27 @@
+*.swp
+__pycache__/**
+out/
+core*
+*.ipynb
+# *.sh
+*.bin
+wandb
+demo/
+backup
+*.pth
+#*.txt
+out/
+log/
+*.json
+*.xlsx
+*.mp4
+tools/*.jpg
+tools/*.mp4
+WLASL2000/
+data/WLASL/rgb_format/
+data/WLASL/pose_format/
+pretrained_weight/
+wlasl_pose_only_islr.pth
+wlasl_rgb_pose_islr.pth
+wlasl_pose_format.zip
+WLASL2000.zip
