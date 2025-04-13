@@ -1,6 +1,6 @@
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from models import Uni_Sign
 import utils as utils
 from datasets import S2T_Dataset
@@ -10,14 +10,24 @@ import argparse, json, datetime
 from pathlib import Path
 import math
 import sys
+import numpy as np
+from sklearn.model_selection import KFold
 from timm.optim import create_optimizer
 from models import get_requires_grad_dict
-from SLRT_metrics import translation_performance, islr_performance, wer_list, islr_performance_topk # Import new function
+from SLRT_metrics import translation_performance, islr_performance, wer_list, islr_performance_topk
 from transformers import get_scheduler
+import wandb
 from config import *
 
 def main(args):
     utils.init_distributed_mode_ds(args)
+
+    if utils.is_main_process():
+        wandb.init(
+            project=args.wandb_project or "uni-sign",
+            name=args.wandb_run_name,
+            config=vars(args)
+        )
 
     print(args)
     utils.set_seed(args.seed)
@@ -244,7 +254,11 @@ def train_one_epoch(args, model, data_loader, optimizer, epoch):
 
 def evaluate(args, data_loader, model, model_without_ddp, phase):
     model.eval()
-
+    n_folds = getattr(args, 'n_folds', 1)
+    
+    if n_folds > 1 and phase == 'test':
+        return cross_validate(args, data_loader, model, model_without_ddp, n_folds)
+    
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
 
@@ -345,8 +359,123 @@ def evaluate(args, data_loader, model, model_without_ddp, phase):
             with open(args.output_dir+f'/{phase}_tmp_refs.txt','w') as f:
                 for i in range(len(tgt_refs)):
                     f.write(tgt_refs[i]+'\n')
+    metrics = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    if utils.is_main_process():
+        wandb.log({f"{phase}/{k}": v for k, v in metrics.items()})
+
+    return metrics
+
+def cross_validate(args, data_loader, model, model_without_ddp, n_folds):
+        """Perform k-fold cross-validation"""
+        dataset = data_loader.dataset
+        kfold = KFold(n_splits=n_folds, shuffle=True, random_state=args.seed)
+        
+        all_metrics = []
+        
+        for fold, (train_idx, val_idx) in enumerate(kfold.split(range(len(dataset)))):
+            print(f"\nEvaluating fold {fold + 1}/{n_folds}")
+            
+            # Create a new dataloader for this fold's validation set
+            fold_dataset = Subset(dataset, val_idx)
+            fold_loader = DataLoader(
+                fold_dataset,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+                collate_fn=dataset.collate_fn,
+                pin_memory=args.pin_mem
+            )
+            
+            # Evaluate on this fold
+            model.eval()
+            metric_logger = utils.MetricLogger(delimiter="  ")
+            
+            with torch.no_grad():
+                tgt_pres = []
+                tgt_refs = []
+                
+                for src_input, tgt_input in metric_logger.log_every(fold_loader, 10, f"Fold {fold + 1}"):
+                    if model.bfloat16_enabled():
+                        for key in src_input.keys():
+                            if isinstance(src_input[key], torch.Tensor):
+                                src_input[key] = src_input[key].to(torch.bfloat16).cuda()
+                    
+                    if args.task == "CSLR":
+                        tgt_input['gt_sentence'] = tgt_input['gt_gloss']
+                    stack_out = model(src_input, tgt_input)
+                    
+                    total_loss = stack_out['loss']
+                    metric_logger.update(loss=total_loss.item())
+                    
+                    if args.task == "ISLR":
+                        tgt_pres.append(stack_out['logits'])
+                        tgt_refs.append(stack_out['target_ids'])
+                    else:
+                        output = model_without_ddp.generate(stack_out,
+                                                          max_new_tokens=100,
+                                                          num_beams=4)
+                        for i in range(len(output)):
+                            tgt_pres.append(output[i])
+                            tgt_refs.append(tgt_input['gt_sentence'][i])
+                
+                # Calculate metrics for this fold
+                fold_metrics = calculate_fold_metrics(args, model_without_ddp, tgt_pres, tgt_refs)
+                all_metrics.append(fold_metrics)
+                
+                if utils.is_main_process():
+                    wandb.log({f"fold_{fold + 1}/{k}": v for k, v in fold_metrics.items()})
+        
+        # Calculate mean and std across folds
+        mean_metrics = {}
+        std_metrics = {}
+        
+        for metric in all_metrics[0].keys():
+            values = [m[metric] for m in all_metrics]
+            mean_metrics[metric] = np.mean(values)
+            std_metrics[metric] = np.std(values)
+            
+            if utils.is_main_process():
+                wandb.log({
+                    f"cross_val/mean_{metric}": mean_metrics[metric],
+                    f"cross_val/std_{metric}": std_metrics[metric]
+                })
+                print(f"{metric}: {mean_metrics[metric]:.2f} ± {std_metrics[metric]:.2f}")
+        
+        return mean_metrics
+
+def calculate_fold_metrics(args, model_without_ddp, tgt_pres, tgt_refs):
+
+    """Calculate metrics for a single fold based on task type"""
+    if args.task == "ISLR":
+        all_logits = torch.cat(tgt_pres, dim=0)
+        all_targets = torch.cat(tgt_refs, dim=0)
+        return islr_performance_topk(all_logits, all_targets, ks=[1, 3, 5, 7, 10])
+
+    elif args.task == "SLT":
+        tokenizer = model_without_ddp.mt5_tokenizer
+        padding_value = tokenizer.eos_token_id
+        
+        if tgt_pres:
+            max_len = max(len(t) for t in tgt_pres)
+            pad_tensor = torch.ones(max_len - len(tgt_pres[0]), device=tgt_pres[0].device, dtype=torch.long) * padding_value
+            tgt_pres[0] = torch.cat((tgt_pres[0], pad_tensor), dim=0)
+            tgt_pres = pad_sequence(tgt_pres, batch_first=True, padding_value=padding_value)
+            tgt_pres = tokenizer.batch_decode(tgt_pres, skip_special_tokens=True)
+            
+            if args.dataset == 'CSL_Daily':
+                tgt_pres = [' '.join(list(r.replace(" ",'').replace("\n",''))) for r in tgt_pres]
+                tgt_refs = [' '.join(list(r.replace("，", ',').replace("？","?").replace(" ",''))) for r in tgt_refs]
+                
+            bleu_dict, rouge_score = translation_performance(tgt_refs, tgt_pres)
+            metrics = bleu_dict.copy()
+            metrics['rouge'] = rouge_score
+            return metrics
+
+    elif args.task == "CSLR":
+        return wer_list(hypotheses=tgt_pres, references=tgt_refs)
+
+    return {}
+
 
 if __name__ == '__main__':
     os.environ["TOKENIZERS_PARALLELISM"] = "false"

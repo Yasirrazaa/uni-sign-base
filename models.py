@@ -9,7 +9,7 @@ from einops import rearrange
 import math
 from stgcn_layers import Graph, get_stgcn_chain
 from deformable_attention_2d import DeformableAttention2D
-from transformers import MT5ForConditionalGeneration, T5Tokenizer 
+from transformers import MT5ForConditionalGeneration, T5Tokenizer
 import warnings
 from config import mt5_path
 
@@ -73,9 +73,9 @@ class Uni_Sign(nn.Module):
     def __init__(self, args):
         super(Uni_Sign, self).__init__()
         self.args = args
-        
+
         self.modes = ['body', 'left', 'right', 'face_all']
-        
+
         self.graph, A = {}, []
         # project (x,y,score) to hidden dim
         hidden_dim = args.hidden_dim
@@ -91,27 +91,27 @@ class Uni_Sign(nn.Module):
         for index, mode in enumerate(self.modes):
             self.gcn_modules[mode], final_dim = get_stgcn_chain(64, 'spatial', (1, spatial_kernel_size), A[index].clone(), True)
             self.fusion_gcn_modules[mode], _ = get_stgcn_chain(final_dim, 'temporal', (5, spatial_kernel_size), A[index].clone(), True)
-        
+
         self.gcn_modules['left'] = self.gcn_modules['right']
         self.fusion_gcn_modules['left'] = self.fusion_gcn_modules['right']
         self.proj_linear['left'] = self.proj_linear['right']
 
         self.part_para = nn.Parameter(torch.zeros(hidden_dim*len(self.modes)))
         self.pose_proj = nn.Linear(256*4, 768)
-        
+
         self.apply(self._init_weights)
-        
+
         if "CSL" in self.args.dataset:
             self.lang = 'Chinese'
         else:
             self.lang = 'English'
-        
+
         if self.args.rgb_support:
             self.rgb_support_backbone = torch.nn.Sequential(*list(torchvision.models.efficientnet_b0(pretrained=True).children())[:-2])
             self.rgb_proj = nn.Conv2d(1280, hidden_dim, kernel_size=1)
 
             self.fusion_pose_rgb_linear = nn.Linear(hidden_dim, hidden_dim)
-            
+
             # PGF
             self.fusion_pose_rgb_DA = DeformableAttention2D(
                                         dim = hidden_dim,            # feature dimensions
@@ -123,14 +123,14 @@ class Uni_Sign(nn.Module):
                                         offset_groups = None,        # number of offset groups, should be multiple of heads
                                         offset_kernel_size = 1,      # offset kernel size
                                     )
-            
+
             self.fusion_gate = nn.Sequential(nn.Conv1d(hidden_dim*2, hidden_dim, 1),
                                         nn.GELU(),
                                         nn.Conv1d(hidden_dim, 1, 1),
                                         nn.Tanh(),
                                         nn.ReLU(),
                                     )
-            
+
             for layer in self.fusion_gate:
                 if isinstance(layer, nn.Conv1d):
                     nn.init.constant_(layer.weight, 0)
@@ -138,8 +138,8 @@ class Uni_Sign(nn.Module):
 
         self.mt5_model = MT5ForConditionalGeneration.from_pretrained(mt5_path)
         self.mt5_tokenizer = T5Tokenizer.from_pretrained(mt5_path, legacy=False)
-    
-        
+
+
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
@@ -164,7 +164,7 @@ class Uni_Sign(nn.Module):
         b, c, T, n = gcn_feat.shape
         assert rgb_feat.shape[0] == indices.shape[0]
         rgb_feat = self.rgb_proj(rgb_feat)
-        
+
         assert len(rgb_len) == b
         start = 0
         for batch in range(b):
@@ -173,33 +173,33 @@ class Uni_Sign(nn.Module):
             if rgb_len[batch] == 1 and -1 in index:
                 start = start + rgb_len[batch]
                 continue
-            
+
             # index selection
             gcn_feat_selected = gcn_feat[batch, :, index]
             rgb_feat_selected = rgb_feat[start:start + rgb_len[batch]]
             pose_init_selected = pose_init[start:start + rgb_len[batch]]
-            
+
             gcn_feat_selected = rearrange(gcn_feat_selected, 'c t n -> t c n')
             pose_init_selected = rearrange(pose_init_selected, 't n c -> t c n')
-            
+
             # PGF forward
             with self.maybe_autocast():
                 fused_transposed = self.fusion_pose_rgb_DA(pose_feat=gcn_feat_selected,
-                                                            rgb_feat=rgb_feat_selected, 
+                                                            rgb_feat=rgb_feat_selected,
                                                             pose_init=pose_init_selected, )
-            
+
             fused_transposed = fused_transposed.to(gcn_feat.dtype)
             gate_feature = torch.concat([fused_transposed, gcn_feat_selected,], dim=-2)
             gate_score = self.fusion_gate(gate_feature)
             fused_transposed_post = (gate_score) * fused_transposed + (1 - gate_score) * gcn_feat_selected
-            
-            gcn_feat = gcn_feat.clone() 
+
+            gcn_feat = gcn_feat.clone()
             fused_transposed_post = rearrange(fused_transposed_post, 't c n -> c t n')
-            
+
             # replace gcn feature
             gcn_feat[batch, :, index] = fused_transposed_post
             start = start + rgb_len[batch]
-            
+
         assert start == rgb_feat.shape[0]
         return gcn_feat
 
@@ -209,10 +209,10 @@ class Uni_Sign(nn.Module):
             rgb_support_dict = {}
             for index_key, rgb_key in zip(['left_sampled_indices', 'right_sampled_indices'], ['left_hands', 'right_hands']):
                 rgb_feat = self.rgb_support_backbone(src_input[rgb_key])
-                
+
                 rgb_support_dict[index_key] = src_input[index_key]
                 rgb_support_dict[rgb_key] = rgb_feat
-        
+
         # Pose branch forward
         features = []
 
@@ -230,25 +230,25 @@ class Uni_Sign(nn.Module):
                 if part == 'left':
                     # Pose RGB fusion
                     if self.args.rgb_support:
-                        gcn_feat = self.gather_feat_pose_rgb(gcn_feat, 
-                                                            rgb_support_dict[f'{part}_hands'], 
-                                                            rgb_support_dict[f'{part}_sampled_indices'], 
+                        gcn_feat = self.gather_feat_pose_rgb(gcn_feat,
+                                                            rgb_support_dict[f'{part}_hands'],
+                                                            rgb_support_dict[f'{part}_sampled_indices'],
                                                             src_input[f'{part}_rgb_len'],
                                                             src_input[f'{part}_skeletons_norm'],
                                                             )
-                        
+
                     gcn_feat = gcn_feat + body_feat[..., -2][...,None].detach()
-                    
+
                 elif part == 'right':
                     # Pose RGB fusion
                     if self.args.rgb_support:
-                        gcn_feat = self.gather_feat_pose_rgb(gcn_feat, 
-                                                                rgb_support_dict[f'{part}_hands'], 
+                        gcn_feat = self.gather_feat_pose_rgb(gcn_feat,
+                                                                rgb_support_dict[f'{part}_hands'],
                                                                 rgb_support_dict[f'{part}_sampled_indices'],
                                                                 src_input[f'{part}_rgb_len'],
                                                                 src_input[f'{part}_skeletons_norm'],
                                                                 )
-                        
+
                     gcn_feat = gcn_feat + body_feat[..., -1][...,None].detach()
 
                 elif part == 'face_all':
@@ -256,12 +256,12 @@ class Uni_Sign(nn.Module):
 
                 else:
                     raise NotImplementedError
-            
+
             # temporal gcn forward
             gcn_feat = self.fusion_gcn_modules[part](gcn_feat) #B,C,T,V
             pool_feat = gcn_feat.mean(-1).transpose(1,2) #B,T,C
             features.append(pool_feat)
-        
+
         # concat sub-pose feature across token dimension
         inputs_embeds = torch.cat(features, dim=-1) + self.part_para
         inputs_embeds = self.pose_proj(inputs_embeds)
@@ -272,28 +272,28 @@ class Uni_Sign(nn.Module):
                                 truncation=True,
                                 return_tensors="pt",
                             ).to(inputs_embeds.device)
-        
+
         prefix_embeds = self.mt5_model.encoder.embed_tokens(prefix_token['input_ids'])
         inputs_embeds = torch.cat([prefix_embeds, inputs_embeds], dim=1)
 
         attention_mask = torch.cat([prefix_token['attention_mask'],
                                     src_input['attention_mask']], dim=1)
 
-        tgt_input_tokenizer = self.mt5_tokenizer(tgt_input['gt_sentence'], 
-                                                return_tensors="pt", 
+        tgt_input_tokenizer = self.mt5_tokenizer(tgt_input['gt_sentence'],
+                                                return_tensors="pt",
                                                 padding=True,
                                                 truncation=True,
                                                 max_length=50)
-            
+
         labels = tgt_input_tokenizer['input_ids']
         labels[labels == self.mt5_tokenizer.pad_token_id] = -100
-        
+
         out = self.mt5_model(inputs_embeds = inputs_embeds,
                     attention_mask = attention_mask,
                     labels = labels.to(inputs_embeds.device),
                     return_dict = True,
                     )
-        
+
         label = labels.reshape(-1)
         out_logits = out['logits']
         logits = out_logits.reshape(-1,out_logits.shape[-1])
@@ -311,12 +311,12 @@ class Uni_Sign(nn.Module):
         }
 
         return stack_out
-    
+
     @torch.no_grad()
     def generate(self,pre_compute_item,max_new_tokens,num_beams):
         inputs_embeds = pre_compute_item['inputs_embeds']
         attention_mask = pre_compute_item['attention_mask']
-       
+
         out = self.mt5_model.generate(inputs_embeds = inputs_embeds,
                                 attention_mask = attention_mask,
                                 max_new_tokens=max_new_tokens,

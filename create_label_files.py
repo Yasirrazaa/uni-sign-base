@@ -37,6 +37,7 @@ def create_label_files(json_file, class_limit, output_prefix):
         if len(action) >= 1 and action[0] < class_limit:
             # Create the label entry
             entry = {
+                'class_id': action[0],
                 'name': video_id,
                 'gloss': class_list.get(action[0], ''),  # Get the gloss from class_list
                 'text': class_list.get(action[0], ''),   # Use the same for text
@@ -53,7 +54,7 @@ def create_label_files(json_file, class_limit, output_prefix):
 
     # Save the label data for each subset
     save_dataset_file(train_data, f"{output_prefix}.train")
-    save_dataset_file(val_data, f"{output_prefix}.val")
+    save_dataset_file(val_data, f"{output_prefix}.dev")
     save_dataset_file(test_data, f"{output_prefix}.test")
 
     print(f"Created label files for {class_limit} classes:")
@@ -66,6 +67,7 @@ def main():
     create_label_files('nslt_100.json', 100, 'data/WLASL/labels-100')
     create_label_files('nslt_300.json', 300, 'data/WLASL/labels-300')
     create_label_files('nslt_1000.json', 1000, 'data/WLASL/labels-1000')
+    create_label_files('nslt_2000.json', 2000, 'data/WLASL/labels-2000')
 
 if __name__ == "__main__":
     main()

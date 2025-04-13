@@ -531,4 +531,14 @@ def get_args_parser():
     # select label smooth
     parser.add_argument("--label_smoothing", default=0.2, type=float)
     
+    # wandb configuration
+    parser.add_argument("--wandb_project", type=str, default=None,
+                      help="Weights & Biases project name")
+    parser.add_argument("--wandb_run_name", type=str, default=None,
+                      help="Weights & Biases run name")
+    
+    # cross-validation configuration
+    parser.add_argument("--n_folds", type=int, default=1,
+                      help="Number of folds for cross-validation (default: 1, no cross-validation)")
+    
     return parser

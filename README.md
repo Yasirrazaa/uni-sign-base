@@ -55,6 +55,25 @@ bash ./script/train_stage2.sh
 bash ./script/train_stage3.sh
 ```
 
+### Classification Approaches
+Uni-Sign supports two approaches for classification:
+
+1. **MT5-based Classification (Default)**: Uses MT5 encoder-decoder architecture for token generation and classification.
+2. **Direct Classification Head**: A simpler and potentially faster approach using a neural network classifier.
+
+To use the classification head instead of MT5, add these parameters to your training command:
+```bash
+--use_classifier_head True --num_classes 2000  # for WLASL2000 dataset
+```
+
+The classification head consists of:
+- Feature projection (768 -> 1024)
+- ReLU activation and dropout
+- Final classification layer (1024 -> num_classes)
+
+Both approaches use the same backbone and are compatible with pretrained weights.
+```
+
 ### Evaluation
 After completing stage 3 fine-tuning, performance evaluation on a single GPU can be performed using the following command:
 ```bash

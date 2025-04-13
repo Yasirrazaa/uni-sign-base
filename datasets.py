@@ -217,28 +217,38 @@ def load_support_rgb_dict(tmp, skeletons, confs, full_path, data_transform):
         all_indices.append(left_sampled_indices)
     if not right_sampled_indices is None:
         all_indices.append(right_sampled_indices)
-    if len(all_indices) == 0:
-        support_rgb_dict['left_sampled_indices'] = torch.tensor([-1])
-        support_rgb_dict['left_hands'] = torch.zeros(1, 3, image_size, image_size)
-        support_rgb_dict['left_skeletons_norm'] = torch.zeros(1, 21, 2)
-        
-        support_rgb_dict['right_sampled_indices'] = torch.tensor([-1])
-        support_rgb_dict['right_hands'] = torch.zeros(1, 3, image_size, image_size)
-        support_rgb_dict['right_skeletons_norm'] = torch.zeros(1, 21, 2)
+    # Helper function to create empty support dict
+    def empty_support_dict(image_size=112):
+        return {
+            'left_sampled_indices': torch.tensor([-1]),
+            'left_hands': torch.zeros(1, 3, image_size, image_size),
+            'left_skeletons_norm': torch.zeros(1, 21, 2),
+            'right_sampled_indices': torch.tensor([-1]),
+            'right_hands': torch.zeros(1, 3, image_size, image_size),
+            'right_skeletons_norm': torch.zeros(1, 21, 2)
+        }
 
-        return support_rgb_dict
+    if len(all_indices) == 0:
+        return empty_support_dict(image_size)
 
     sampled_indices = np.concatenate(all_indices)
     sampled_indices = np.unique(sampled_indices)
     sampled_indices_real = tmp[sampled_indices]
 
     # load image sample
-    imgs = load_video_support_rgb(full_path, sampled_indices_real)
+    try:
+        imgs = load_video_support_rgb(full_path, sampled_indices_real)
+        if len(imgs) == 0:
+            print(f"Warning: No valid frames found in {full_path}, skipping")
+            return empty_support_dict(image_size=112)
 
-    # get hand bbox
-    left_new_box, right_new_box, box_hw = bbox_4hands(left_skeletons,
-                                                        right_skeletons,
-                                                        imgs[0].shape[:2])
+        # get hand bbox
+        left_new_box, right_new_box, box_hw = bbox_4hands(left_skeletons,
+                                                         right_skeletons,
+                                                         imgs[0].shape[:2])
+    except Exception as e:
+        print(f"Warning: Error processing video {full_path}: {str(e)}")
+        return empty_support_dict(image_size=112)
     
     # crop left and right hand
     image_size = 112
@@ -323,36 +333,44 @@ def load_support_rgb_dict(tmp, skeletons, confs, full_path, data_transform):
 
 # use split rgb video for save time
 def load_video_support_rgb(path, tmp):
-    vr = VideoReader(path, num_threads=1, ctx=cpu(0))
-    
-    num_frames = len(vr)
-    # Filter indices to be within valid range
-    tmp_filtered = [int(idx) for idx in tmp if 0 <= int(idx) < num_frames]
-    if len(tmp_filtered) < len(tmp):
-        # Optionally, warn or log dropped indices
-        pass  # Could add print or logging here if desired
-    
-    vr.seek(0)
-    if tmp_filtered:
-        buffer = vr.get_batch(tmp_filtered).asnumpy()
-    else:
-        # If no valid indices, return an empty array with shape (0,)
-        buffer = np.array([])
-    batch_image = buffer
-    del vr
-
-    return batch_image
+    try:
+        if not os.path.exists(path):
+            print(f"Warning: RGB video file not found: {path}")
+            return np.array([])  # Return empty array for missing video
+            
+        vr = VideoReader(path, num_threads=1, ctx=cpu(0))
+        
+        num_frames = len(vr)
+        # Filter indices to be within valid range
+        tmp_filtered = [int(idx) for idx in tmp if 0 <= int(idx) < num_frames]
+        if len(tmp_filtered) < len(tmp):
+            print(f"Warning: Some frame indices out of range for video: {path}")
+        
+        vr.seek(0)
+        if tmp_filtered:
+            buffer = vr.get_batch(tmp_filtered).asnumpy()
+        else:
+            buffer = np.array([])
+        batch_image = buffer
+        del vr
+        
+        return batch_image
+        
+    except Exception as e:
+        print(f"Warning: Error loading RGB video {path}: {str(e)}")
+        return np.array([])  # Return empty array for any loading errors
 
 # build base dataset
 class Base_Dataset(Dataset.Dataset):
     def collate_fn(self, batch):
-        tgt_batch,src_length_batch,name_batch,pose_tmp,gloss_batch = [],[],[],[],[]
+        tgt_batch,src_length_batch,name_batch,pose_tmp,gloss_batch,class_id_batch = [],[],[],[],[],[]
         
-        for name_sample, pose_sample, text, gloss, _ in batch:
+        for name_sample, pose_sample, text, gloss, class_id, _ in batch:
             name_batch.append(name_sample)
             pose_tmp.append(pose_sample)
             tgt_batch.append(text)
             gloss_batch.append(gloss)
+            class_id_batch.append(class_id)
 
         src_input = {}
 
@@ -388,7 +406,7 @@ class Base_Dataset(Dataset.Dataset):
                 
         if self.rgb_support:
             support_rgb_dicts = {key:[] for key in batch[0][-1].keys()}
-            for _, _, _, _, support_rgb_dict in batch:
+            for _, _, _, _,_, support_rgb_dict in batch:
                 for key in support_rgb_dict.keys():
                     support_rgb_dicts[key].append(support_rgb_dict[key])
             
@@ -410,6 +428,7 @@ class Base_Dataset(Dataset.Dataset):
         tgt_input = {}
         tgt_input['gt_sentence'] = tgt_batch
         tgt_input['gt_gloss'] = gloss_batch
+        tgt_input['class_id'] = torch.tensor(class_id_batch, dtype=torch.long)
 
         return src_input, tgt_input
 
@@ -445,31 +464,57 @@ class S2T_Dataset(Base_Dataset):
         return len(self.list)
     
     def __getitem__(self, index):
-        key = self.list[index]
-        sample = self.raw_data[key]
-
-        text = sample['text']
-        if "gloss" in sample.keys():
-            gloss = " ".join(sample['gloss'])
-        else:
-            gloss = ''
+        max_retries = 10
+        current_index = index
         
-        name_sample = sample['name']
-        pose_sample, support_rgb_dict = self.load_pose(sample['video_path'])
-
-        return name_sample,pose_sample,text, gloss, support_rgb_dict
+        for _ in range(max_retries):
+            try:
+                key = self.list[current_index]
+                sample = self.raw_data[key]
+                class_id = sample['class_id']  # Get class ID from sample
+                
+                text = sample['text']
+                if "gloss" in sample.keys():
+                    gloss = " ".join(sample['gloss'])
+                else:
+                    gloss = ''
+                
+                name_sample = sample['name']
+                pose_sample, support_rgb_dict = self.load_pose(sample['video_path'])
+                
+                return name_sample, pose_sample, text, gloss, class_id, support_rgb_dict
+                
+            except FileNotFoundError as e:
+                print(f"Warning: Skipping missing file for index {current_index}: {str(e)}")
+                current_index = (current_index + 1) % len(self.list)
+                continue
+        
+        raise RuntimeError(f"Failed to load valid data after {max_retries} attempts")
     
     def load_pose(self, path):
-        pose = pickle.load(open(os.path.join(self.pose_dir, path.replace(".mp4", '.pkl')), 'rb'))
-            
-        if 'start' in pose.keys():
-            assert pose['start'] < pose['end']
-            duration = pose['end'] - pose['start']
-            start = pose['start']
-        else:
-            duration = len(pose['scores'])
-            start = 0
+        try:
+            # Check if pose file exists and load it
+            pose_path = os.path.join(self.pose_dir, path.replace(".mp4", '.pkl'))
+            if not os.path.exists(pose_path):
+                print(f"Warning: Pose file not found: {pose_path}")
+                raise FileNotFoundError(f"Pose file not found: {pose_path}")
                 
+            pose = pickle.load(open(pose_path, 'rb'))
+                
+            # Get duration and start point
+            if 'start' in pose.keys():
+                if pose['start'] >= pose['end']:  # Skip invalid start/end
+                    print(f"Warning: Invalid start/end in pose file: {pose_path}")
+                    raise ValueError("Invalid start/end values")
+                duration = pose['end'] - pose['start']
+                start = pose['start']
+            else:
+                duration = len(pose['scores'])
+                start = 0
+
+        except (FileNotFoundError, EOFError, ValueError) as e:
+            print(f"Warning: Error loading pose file {pose_path}: {str(e)}")
+            raise  # Re-raise for __getitem__ to handle
         if duration > self.max_length:
             tmp = sorted(random.sample(range(duration), k=self.max_length))
         else:

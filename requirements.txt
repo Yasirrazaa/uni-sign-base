@@ -20,6 +20,7 @@ torchvision==0.16.1+cu121
 tqdm==4.65.0
 transformers==4.40.0
 sentencepiece==0.1.97
+wandb==0.16.3
 numpy>=1.22.4,<1.25.0  # More compatible range with your other dependencies
 scipy>=1.7.3,<1.11.0   # More flexible but still compatible range
 tensorflow>=2.9.1,<2.16.0  # Allow for newer TF versions if needed
