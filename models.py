@@ -73,7 +73,10 @@ class Uni_Sign(nn.Module):
     def __init__(self, args):
         super(Uni_Sign, self).__init__()
         self.args = args
-
+        self.use_classifier_head = getattr(args, 'use_classifier_head', False)
+        self.num_classes = getattr(args, 'num_classes', 2000)  # Default to 2000 for WLASL
+        self.freeze_backbone = getattr(args, 'freeze_backbone', True)  # Default to True when using classifier
+        
         self.modes = ['body', 'left', 'right', 'face_all']
 
         self.graph, A = {}, []
@@ -136,8 +139,29 @@ class Uni_Sign(nn.Module):
                     nn.init.constant_(layer.weight, 0)
                     nn.init.constant_(layer.bias, 0)
 
+        # Classification head
+        if self.use_classifier_head:
+            self.classifier = nn.Sequential(
+                nn.Linear(768, 1024),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(1024, self.num_classes)
+            )
+
+        # Initialize MT5 model and tokenizer
         self.mt5_model = MT5ForConditionalGeneration.from_pretrained(mt5_path)
         self.mt5_tokenizer = T5Tokenizer.from_pretrained(mt5_path, legacy=False)
+
+        # Freeze backbone if using classifier head
+        if self.use_classifier_head and self.freeze_backbone:
+            # Freeze all parameters
+            for param in self.parameters():
+                param.requires_grad = False
+            
+            # Unfreeze classifier parameters
+            if hasattr(self, 'classifier'):
+                for param in self.classifier.parameters():
+                    param.requires_grad = True
 
 
     def _init_weights(self, m):
@@ -203,7 +227,7 @@ class Uni_Sign(nn.Module):
         assert start == rgb_feat.shape[0]
         return gcn_feat
 
-    def forward(self, src_input, tgt_input):
+    def forward(self, src_input, tgt_input=None):
         # RGB branch forward
         if self.args.rgb_support:
             rgb_support_dict = {}
@@ -263,8 +287,29 @@ class Uni_Sign(nn.Module):
             features.append(pool_feat)
 
         # concat sub-pose feature across token dimension
+        # Concatenate and project features
         inputs_embeds = torch.cat(features, dim=-1) + self.part_para
         inputs_embeds = self.pose_proj(inputs_embeds)
+
+        # Handle classification with classifier head if enabled
+        if self.use_classifier_head:
+            # Average pooling across temporal dimension for classification
+            pooled_features = inputs_embeds.mean(dim=1)  # B, 768
+            logits = self.classifier(pooled_features)
+            
+            if tgt_input is not None:
+                labels = tgt_input['class_id']  # Use class_id from dataset
+                loss_fct = torch.nn.CrossEntropyLoss(label_smoothing=self.args.label_smoothing)
+                loss = loss_fct(logits, labels)
+                return {
+                    'loss': loss,
+                    'logits': logits,  # Shape: (batch_size, num_classes)
+                    'target_ids': labels  # Shape: (batch_size,)
+                }
+            return {
+                'logits': logits,
+                'target_ids': None
+            }
 
         prefix_token = self.mt5_tokenizer(
                                 [f"Translate sign language video to {self.lang}: "] * len(tgt_input["gt_sentence"]),
@@ -285,6 +330,7 @@ class Uni_Sign(nn.Module):
                                                 truncation=True,
                                                 max_length=50)
 
+        # Original MT5 approach
         labels = tgt_input_tokenizer['input_ids']
         labels[labels == self.mt5_tokenizer.pad_token_id] = -100
 

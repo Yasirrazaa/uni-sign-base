@@ -331,7 +331,7 @@ def concat_all_gather(tensor):
     tensors_gather = [torch.ones_like(tensor)
         for _ in range(torch.distributed.get_world_size())]
     torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
-    
+
     output = torch.cat(tensors_gather,dim=0)
     return output
 
@@ -373,7 +373,7 @@ def get_train_ds_config(offload,
         "stage3_prefetch_bucket_size": 3e7,
         "memory_efficient_linear": False
     }
-    
+
     if enable_mixed_precision_lora:
         zero_opt_dict["zero_quantized_nontrainable_weights"] = True
         if dist.get_world_size() != get_accelerator().device_count():
@@ -425,7 +425,7 @@ def init_deepspeed(args, model, optimizer, lr_scheduler):
             config=ds_config,
             lr_scheduler=lr_scheduler,
             dist_init_required=True)
-    
+
     return _wrapped_model, _optimizer, _lr_sched
 
 def set_seed(seed):
@@ -435,7 +435,7 @@ def set_seed(seed):
 
     np.random.seed(seed)
     random.seed(seed)
-    
+
     cudnn.deterministic = True # Since the input dim is dynamic.
     cudnn.benchmark = False # Since the input dim is dynamic.
 
@@ -470,7 +470,7 @@ def get_args_parser():
                         help='SGD momentum (default: 0.9)')
     parser.add_argument('--weight-decay', type=float, default=0.0001,
                         help='weight decay (default: 0.05)')
-    
+
     parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
                         help='LR scheduler (default: "cosine"')
     parser.add_argument('--lr', type=float, default=1.0e-3, metavar='LR',
@@ -510,35 +510,63 @@ def get_args_parser():
                         action='store_true',
                         help='Relevant for low precision dtypes (fp16, bf16, etc.). '
                         'If specified, loss is calculated in fp32.')
-    
+
     parser.add_argument('--quick_break',
                         type=int,
                         default=0,
                         help='save ckpt per quick_break step')
-    
+
     # RGB branch
     parser.add_argument('--rgb_support', action='store_true',)
-    
+
     # Pose length
     parser.add_argument("--max_length", default=256, type=int)
-    
+
     # select dataset
     parser.add_argument("--dataset", default="CSL_Daily", choices=['CSL_News', "CSL_Daily", "WLASL"])
-    
+
     # select task
     parser.add_argument("--task", default="SLT", choices=['SLT', "ISLR", "CSLR"])
-    
+
     # select label smooth
     parser.add_argument("--label_smoothing", default=0.2, type=float)
-    
+
+    # ISLR specific arguments
+    parser.add_argument("--num_classes", default=2000, type=int,
+                      help="Number of classes for ISLR task (default: 2000)")
+    parser.add_argument("--use_focal_loss", action="store_true",
+                      help="Use Focal Loss for ISLR task")
+    parser.add_argument("--focal_alpha", default=0.25, type=float,
+                      help="Alpha parameter for Focal Loss")
+    parser.add_argument("--focal_gamma", default=2.0, type=float,
+                      help="Gamma parameter for Focal Loss")
+    parser.add_argument("--use_temporal_attention", action="store_true",
+                      help="Use temporal attention mechanism for ISLR task")
+    parser.add_argument("--use_fpn", action="store_true",
+                      help="Use Feature Pyramid Network for multi-scale feature extraction")
+    parser.add_argument("--dropout", default=0.1, type=float,
+                      help="Dropout rate for ISLR model")
+    parser.add_argument("--use_mixup", action="store_true",
+                      help="Use mixup data augmentation for ISLR task")
+    parser.add_argument("--mixup_alpha", default=0.2, type=float,
+                      help="Alpha parameter for mixup augmentation")
+    # Classification head options
+    parser.add_argument("--use_classifier_head", action="store_true",
+                      help="Use classification head instead of MT5")
+    parser.add_argument("--freeze_backbone", action="store_true",
+                      help="Freeze backbone when using classifier head")
+    parser.add_argument("--use_future_mask", action="store_true",
+                      help="Use future masking during training")
+
+
     # wandb configuration
     parser.add_argument("--wandb_project", type=str, default=None,
                       help="Weights & Biases project name")
     parser.add_argument("--wandb_run_name", type=str, default=None,
                       help="Weights & Biases run name")
-    
+
     # cross-validation configuration
     parser.add_argument("--n_folds", type=int, default=1,
                       help="Number of folds for cross-validation (default: 1, no cross-validation)")
-    
+
     return parser

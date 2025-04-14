@@ -10,7 +10,7 @@ import torch
 WER_COST_DEL = 3
 WER_COST_INS = 3
 WER_COST_SUB = 4
- 
+
 
 def chrf(references, hypotheses):
     """
@@ -81,7 +81,7 @@ def sequence_accuracy(references, hypotheses):
     return (correct_sequences / len(hypotheses)) * 100 if hypotheses else 0.0
 
 
-# implement sltunet rouge eval  
+# implement sltunet rouge eval
 def rouge_deprecated(references, hypotheses, level='word'):
     #beta 1.2
     rouge_score = 0
@@ -90,7 +90,7 @@ def rouge_deprecated(references, hypotheses, level='word'):
         #split word
         references = [' '.join(list(r)) for r in references]
         hypotheses = [' '.join(list(r)) for r in hypotheses]
-        
+
     for h, r in zip(hypotheses, references):
         rouge_score += mscoco_rouge.calc_score(hypotheses=[h], references=[r]) / n_seq
 
@@ -250,7 +250,7 @@ def get_alignment(r, h, d):
         alignlist[::-1],
         {"align_ref": align_ref, "align_hyp": align_hyp, "alignment": alignment},
     )
-    
+
 def sableu(references, hypotheses, tokenizer):
     """
     Sacrebleu (with tokenization)
@@ -265,7 +265,7 @@ def sableu(references, hypotheses, tokenizer):
     scores = {}
     for n in range(len(bleu_scores)):
         scores["bleu" + str(n + 1)] = bleu_scores[n]
-        
+
     return scores
 
 def translation_performance(txt_ref, txt_hyp):
@@ -273,22 +273,22 @@ def translation_performance(txt_ref, txt_hyp):
     rouge=SLT_Rouge()
     scores = rouge.get_scores(txt_hyp, txt_ref, avg=True)
     scores['rouge-l']['f'] = scores['rouge-l']['f']*100
-    
+
     tokenizer_args = '13a'
     # print('Signature: BLEU+case.mixed+numrefs.1+smooth.exp+tok.%s+version.1.4.2' % tokenizer_args)
     sableu_dict = sableu(references=txt_ref, hypotheses=txt_hyp, tokenizer=tokenizer_args)
     # print('BLEU', sableu_dict)
     # print('Signature: chrF2+case.mixed+numchars.6+numrefs.1+space.False+version.1.4.2')
     # print('Chrf', chrf(references=txt_ref, hypotheses=txt_hyp))
-   
+
     print(sableu_dict)
     print(f"Rough: {scores['rouge-l']['f']:.2f}")
-   
+
     # res = []
     # for n in range(4):
     #     res.append(f"{sableu_dict['bleu' + str(n + 1)]:.2f}")
     # res.append(f"{scores['rouge-l']['f']:.2f}")
-    
+
     # print(" & ".join(res))
 
     return sableu_dict, float(scores['rouge-l']['f'])
@@ -297,7 +297,7 @@ def islr_performance(txt_ref, txt_hyp):
     true_sample = 0
     for tgt_pre, tgt_ref in zip(txt_hyp, txt_ref):
         true_sample += (tgt_pre == tgt_ref)
-    
+
     top1_acc_pi = true_sample / len(txt_hyp) * 100
 
     gt_dict = {}
@@ -320,6 +320,79 @@ def islr_performance(txt_ref, txt_hyp):
     return top1_acc_pi, top1_acc_pc
 
 
+class FocalLoss(torch.nn.Module):
+    """
+    Focal Loss for handling class imbalance in ISLR tasks.
+
+    Args:
+        alpha (float): Weighting factor for the rare class, default is 0.25
+        gamma (float): Focusing parameter, default is 2.0
+        reduction (str): Reduction method, default is 'mean'
+        label_smoothing (float): Label smoothing factor, default is 0.0
+    """
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean', label_smoothing=0.0, ignore_index=-100):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.label_smoothing = label_smoothing
+        self.ignore_index = ignore_index
+
+    def forward(self, inputs, targets):
+        """
+        Args:
+            inputs (torch.Tensor): Predicted logits, shape [B, C] where C is the number of classes
+            targets (torch.Tensor): Ground truth class indices, shape [B]
+
+        Returns:
+            torch.Tensor: Computed loss
+        """
+        # Apply label smoothing if specified
+        if self.label_smoothing > 0.0:
+            # Create smoothed targets
+            num_classes = inputs.size(-1)
+            smoothed_targets = torch.zeros_like(inputs).scatter_(
+                1, targets.unsqueeze(1), 1.0
+            )
+            smoothed_targets = smoothed_targets * (1.0 - self.label_smoothing) + \
+                              self.label_smoothing / num_classes
+
+            # Compute log probabilities
+            log_probs = torch.nn.functional.log_softmax(inputs, dim=-1)
+            loss = -(smoothed_targets * log_probs).sum(dim=-1)
+
+            # Apply focal weighting
+            probs = torch.exp(log_probs)
+            focal_weight = (1 - probs) ** self.gamma
+            loss = focal_weight * loss
+
+            # Apply alpha weighting for positive samples
+            alpha_weight = torch.ones_like(loss)
+            alpha_weight[targets > 0] = self.alpha  # Apply alpha only to positive classes
+            loss = alpha_weight * loss
+        else:
+            # Standard focal loss implementation
+            ce_loss = torch.nn.functional.cross_entropy(
+                inputs, targets, reduction='none', label_smoothing=0.0,
+                ignore_index=self.ignore_index
+            )
+            pt = torch.exp(-ce_loss)
+            focal_weight = (1 - pt) ** self.gamma
+
+            # Apply alpha weighting
+            alpha_weight = torch.ones_like(ce_loss)
+            alpha_weight[targets > 0] = self.alpha  # Apply alpha only to positive classes
+            loss = alpha_weight * focal_weight * ce_loss
+
+        # Apply reduction
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:  # 'none'
+            return loss
+
+
 def islr_performance_topk(logits, target_token_ids, ks=[1, 3, 5, 7, 10]):
     """
     Calculates both per-instance and per-class Top-K accuracy for ISLR.
@@ -338,44 +411,44 @@ def islr_performance_topk(logits, target_token_ids, ks=[1, 3, 5, 7, 10]):
     """
     max_k = max(ks)
     batch_size = logits.size(0)
-    
+
     # Ensure inputs are on same device and correct type
     target_token_ids = target_token_ids.to(device=logits.device, dtype=torch.long)
 
     # Get top K predictions for each sample
     _, topk_indices = torch.topk(logits.float(), max_k, dim=-1)  # Shape: (batch_size, max_k)
-    
+
     # Dictionary to store accuracies
     accuracies = {}
-    
+
     # Per-instance calculation
     # Compare target with top K predictions
     target_expanded = target_token_ids.unsqueeze(1).expand_as(topk_indices[:, :max_k])
     correct_matrix = (topk_indices[:, :max_k] == target_expanded)  # Shape: (batch_size, max_k)
-    
+
     for k in ks:
         # Check if target is in top K predictions for each sample
         correct_k = correct_matrix[:, :k].any(dim=1)  # Shape: (batch_size,)
         accuracy_k = (correct_k.float().sum() / batch_size) * 100
         accuracies[f'top{k}_acc_pi'] = accuracy_k.item()
-    
+
     # Per-class calculation
     # Create dictionaries to track per-class statistics
     class_correct = {}  # {class_id: {k: correct_count}}
     class_total = {}   # {class_id: total_count}
-    
+
     for i in range(batch_size):
         target = target_token_ids[i].item()
         if target not in class_total:
             class_total[target] = 0
             class_correct[target] = {k: 0 for k in ks}
         class_total[target] += 1
-        
+
         # Update correct counts for each K
         for k in ks:
             if correct_matrix[i, :k].any():
                 class_correct[target][k] += 1
-    
+
     # Calculate per-class accuracies for each K
     for k in ks:
         class_accuracies = []
@@ -383,13 +456,12 @@ def islr_performance_topk(logits, target_token_ids, ks=[1, 3, 5, 7, 10]):
             if class_total[class_id] > 0:  # Avoid division by zero
                 class_acc = (class_correct[class_id][k] / class_total[class_id]) * 100
                 class_accuracies.append(class_acc)
-        
+
         # Average across all classes
         accuracies[f'top{k}_acc_pc'] = float(sum(class_accuracies)) / len(class_accuracies)
-    
+
     # Print both per-instance and per-class accuracies
     print("\nTop-K Accuracies (Per Instance):", {k: accuracies[f'top{k}_acc_pi'] for k in ks})
     print("Top-K Accuracies (Per Class):", {k: accuracies[f'top{k}_acc_pc'] for k in ks})
-    
+
     return accuracies
-   

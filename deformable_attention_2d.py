@@ -296,6 +296,11 @@ class DeformableAttention2D(nn.Module):
         # numerical stability
         sim = sim - sim.amax(dim = -1, keepdim = True).detach()
 
+        # future masking
+        seq_len = sim.size(-1)
+        future_mask = torch.triu(torch.ones((seq_len, seq_len), device=sim.device), diagonal=1).bool()
+        sim = sim.masked_fill(future_mask[None,None,:,:], float('-inf'))
+
         # attention
         attn = sim.softmax(dim = -1)
         attn = self.dropout(attn)

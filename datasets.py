@@ -217,38 +217,28 @@ def load_support_rgb_dict(tmp, skeletons, confs, full_path, data_transform):
         all_indices.append(left_sampled_indices)
     if not right_sampled_indices is None:
         all_indices.append(right_sampled_indices)
-    # Helper function to create empty support dict
-    def empty_support_dict(image_size=112):
-        return {
-            'left_sampled_indices': torch.tensor([-1]),
-            'left_hands': torch.zeros(1, 3, image_size, image_size),
-            'left_skeletons_norm': torch.zeros(1, 21, 2),
-            'right_sampled_indices': torch.tensor([-1]),
-            'right_hands': torch.zeros(1, 3, image_size, image_size),
-            'right_skeletons_norm': torch.zeros(1, 21, 2)
-        }
-
     if len(all_indices) == 0:
-        return empty_support_dict(image_size)
+        support_rgb_dict['left_sampled_indices'] = torch.tensor([-1])
+        support_rgb_dict['left_hands'] = torch.zeros(1, 3, image_size, image_size)
+        support_rgb_dict['left_skeletons_norm'] = torch.zeros(1, 21, 2)
+        
+        support_rgb_dict['right_sampled_indices'] = torch.tensor([-1])
+        support_rgb_dict['right_hands'] = torch.zeros(1, 3, image_size, image_size)
+        support_rgb_dict['right_skeletons_norm'] = torch.zeros(1, 21, 2)
+
+        return support_rgb_dict
 
     sampled_indices = np.concatenate(all_indices)
     sampled_indices = np.unique(sampled_indices)
     sampled_indices_real = tmp[sampled_indices]
 
     # load image sample
-    try:
-        imgs = load_video_support_rgb(full_path, sampled_indices_real)
-        if len(imgs) == 0:
-            print(f"Warning: No valid frames found in {full_path}, skipping")
-            return empty_support_dict(image_size=112)
+    imgs = load_video_support_rgb(full_path, sampled_indices_real)
 
-        # get hand bbox
-        left_new_box, right_new_box, box_hw = bbox_4hands(left_skeletons,
-                                                         right_skeletons,
-                                                         imgs[0].shape[:2])
-    except Exception as e:
-        print(f"Warning: Error processing video {full_path}: {str(e)}")
-        return empty_support_dict(image_size=112)
+    # get hand bbox
+    left_new_box, right_new_box, box_hw = bbox_4hands(left_skeletons,
+                                                        right_skeletons,
+                                                        imgs[0].shape[:2])
     
     # crop left and right hand
     image_size = 112

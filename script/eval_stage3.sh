@@ -31,7 +31,7 @@ done
 # single gpu inference
 # RGB-pose setting
 deepspeed --include localhost:0 --master_port 29511 fine_tuning.py \
-   --batch-size 16 \
+   --batch-size 8 \
    --gradient-accumulation-steps 1 \
    --epochs 20 \
    --opt AdamW \
@@ -45,7 +45,7 @@ deepspeed --include localhost:0 --master_port 29511 fine_tuning.py \
    --n_folds $N_FOLDS \
    --wandb_project "$WANDB_PROJECT" \
    --wandb_run_name "$WANDB_RUN_NAME"
-   --use_classifier_head
+
 # # pose-only setting
 #deepspeed --include localhost:0 --master_port 29511 fine_tuning.py \
 #   --batch-size 8 \
