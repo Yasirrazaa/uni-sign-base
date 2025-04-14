@@ -454,57 +454,70 @@ class S2T_Dataset(Base_Dataset):
         return len(self.list)
     
     def __getitem__(self, index):
-        max_retries = 10
-        current_index = index
-        
-        for _ in range(max_retries):
-            try:
-                key = self.list[current_index]
-                sample = self.raw_data[key]
-                class_id = sample['class_id']  # Get class ID from sample
-                
-                text = sample['text']
-                if "gloss" in sample.keys():
-                    gloss = " ".join(sample['gloss'])
-                else:
-                    gloss = ''
-                
-                name_sample = sample['name']
-                pose_sample, support_rgb_dict = self.load_pose(sample['video_path'])
-                
-                return name_sample, pose_sample, text, gloss, class_id, support_rgb_dict
-                
-            except FileNotFoundError as e:
-                print(f"Warning: Skipping missing file for index {current_index}: {str(e)}")
-                current_index = (current_index + 1) % len(self.list)
-                continue
-        
-        raise RuntimeError(f"Failed to load valid data after {max_retries} attempts")
+            max_retries = 10
+            current_index = index
+            original_index = index
+            
+            for attempt in range(max_retries):
+                try:
+                    key = self.list[current_index]
+                    sample = self.raw_data[key]
+                    class_id = sample['class_id']
+                    
+                    text = sample['text']
+                    if "gloss" in sample.keys():
+                        gloss = " ".join(sample['gloss'])
+                    else:
+                        gloss = ''
+                    
+                    name_sample = sample['name']
+                    try:
+                        pose_sample, support_rgb_dict = self.load_pose(sample['video_path'])
+                        if not pose_sample:  # Skip if empty pose data
+                            raise ValueError("Empty pose data")
+                        return name_sample, pose_sample, text, gloss, class_id, support_rgb_dict
+                    except Exception as e:
+                        print(f"Warning: Error with sample {name_sample}: {str(e)}")
+                        current_index = (current_index + 1) % len(self.list)
+                        if current_index == original_index:  # Wrapped around
+                            current_index = (original_index + 1) % len(self.list)
+                        continue
+                except Exception as e:
+                    print(f"Warning: Error at index {current_index}: {str(e)}")
+                    current_index = (current_index + 1) % len(self.list)
+                    if current_index == original_index:  # Wrapped around
+                        current_index = (original_index + 1) % len(self.list)
+                    continue
+            
+            print(f"Warning: Using next available sample after {max_retries} failures")
+            return self.__getitem__((original_index + 1) % len(self.list))  # Try next sample
     
     def load_pose(self, path):
         try:
-            # Check if pose file exists and load it
             pose_path = os.path.join(self.pose_dir, path.replace(".mp4", '.pkl'))
             if not os.path.exists(pose_path):
                 print(f"Warning: Pose file not found: {pose_path}")
-                raise FileNotFoundError(f"Pose file not found: {pose_path}")
-                
+                return None, {}  # Return empty data instead of raising error
+            
             pose = pickle.load(open(pose_path, 'rb'))
-                
-            # Get duration and start point
+            
             if 'start' in pose.keys():
-                if pose['start'] >= pose['end']:  # Skip invalid start/end
+                if pose['start'] >= pose['end']:
                     print(f"Warning: Invalid start/end in pose file: {pose_path}")
-                    raise ValueError("Invalid start/end values")
+                    return None, {}
                 duration = pose['end'] - pose['start']
                 start = pose['start']
             else:
                 duration = len(pose['scores'])
                 start = 0
+            
+            if duration == 0:
+                print(f"Warning: Empty pose file: {pose_path}")
+                return None, {}
 
-        except (FileNotFoundError, EOFError, ValueError) as e:
+        except Exception as e:
             print(f"Warning: Error loading pose file {pose_path}: {str(e)}")
-            raise  # Re-raise for __getitem__ to handle
+            return None, {}  # Return empty data instead of raising error
         if duration > self.max_length:
             tmp = sorted(random.sample(range(duration), k=self.max_length))
         else:
